@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
 from backend.api import (
     advanced_intelligence,
     alerts,
@@ -26,7 +27,7 @@ from backend.api import (
     upload,
     users,
     vision,
-    workspace,
+    workspace,  # existing workspace module under backend.api (kept)
 )
 from backend.services.google_drive import (
     drive_credentials_available,
@@ -35,7 +36,6 @@ from backend.services.google_drive import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 app = FastAPI(title="Diriyah Brain AI", version="v1.24")
 app.add_middleware(
@@ -73,12 +73,12 @@ if not _INDEX_HTML.exists():
 
 def _include_router_if_available(module, tag: str) -> None:
     """Register the router exposed by ``module`` when present."""
-
     router = getattr(module, "router", None)
     if router is not None:
         app.include_router(router, prefix="/api", tags=[tag])
 
 
+# Register all built-in routers that live directly under backend.api.*
 for module, tag in (
     (advanced_intelligence, "Advanced Intelligence"),
     (autocad, "AutoCAD"),
@@ -100,9 +100,26 @@ for module, tag in (
     (drive_scan, "Drive"),
     (drive_diagnose, "Drive"),
     (users, "Users"),
-    (workspace, "Workspace"),
+    (workspace, "Workspace"),  # keeps existing backend.api.workspace if present
 ):
     _include_router_if_available(module, tag)
+
+# --------------------------------------------------------------------
+# NEW: Explicitly include the routes we added at backend/api/routes/workspace.py
+# That file defines: router = APIRouter(prefix="/api/workspace", tags=["workspace"])
+# We do NOT add another prefix here to avoid /api/api/workspace.
+# --------------------------------------------------------------------
+try:
+    from backend.api.routes import workspace as workspace_routes  # type: ignore
+
+    if hasattr(workspace_routes, "router"):
+        app.include_router(workspace_routes.router)
+        logger.info("Registered routes from backend.api.routes.workspace")
+    else:
+        logger.warning("backend.api.routes.workspace has no 'router' attribute")
+except Exception as e:
+    logger.warning("Could not register backend.api.routes.workspace: %s", e)
+# --------------------------------------------------------------------
 
 
 @app.get("/", include_in_schema=False)
