@@ -30,3 +30,5 @@ python-pptx==0.6.23
 rarfile==4.1
 scikit-learn==1.5.2
 pytest==8.2.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.0.0
