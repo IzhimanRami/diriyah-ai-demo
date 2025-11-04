@@ -1,16 +1,11 @@
-"""Utilities and stubs for interacting with Google Drive.
+"""
+Google Drive integration — supports two modes:
 
-This module provides a very small abstraction layer that the rest of the
-application interacts with.  When the real Google client libraries are
-available we attempt to build a Drive service using the configured service
-account file.  When the libraries or credentials are unavailable we fall back
-to deterministic stubbed responses that are convenient for local development
-and unit tests.
+1) Service Account mode (OAuth/credentials) — used for private Drive access.
+2) Public Folder + API Key mode — read-only listing of files that are shared
+   publicly on the web. This works without login and is ideal for demos.
 
-The public helpers intentionally track a bit of internal state so that
-observability surfaces (notably the ``/health`` endpoint) can show whether the
-service is running in stubbed mode as well as the most recent error that
-prevented the real integration from initialising.
+Diagnostics and scan endpoints will prefer Public mode if it is configured.
 """
 
 from __future__ import annotations
@@ -19,33 +14,25 @@ import io
 import os
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# --- Google client libraries (service account path) --------------------------
-try:  # pragma: no cover - exercised indirectly via tests that patch imports
-    from google.oauth2 import service_account  # type: ignore
-    from googleapiclient.discovery import build  # type: ignore
-    from googleapiclient.http import MediaIoBaseUpload  # type: ignore
-except Exception as import_exc:  # pragma: no cover - handled in tests
-    service_account = None  # type: ignore[assignment]
-    build = None  # type: ignore[assignment]
-    MediaIoBaseUpload = None  # type: ignore[assignment]
-    _IMPORT_ERROR: Optional[BaseException] = import_exc
-else:
-    _IMPORT_ERROR = None
+import json
+import urllib.parse
+import urllib.request
 
-# --- Google OAuth (user consent) optional dependency -------------------------
-try:  # pragma: no cover
-    from google_auth_oauthlib.flow import Flow  # type: ignore
-except Exception:
-    Flow = None  # type: ignore[assignment]
-
-# ---------------------------------------------------------------------------
+# -----------------------------
+# Config / Environment
+# -----------------------------
 
 _DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 _CREDENTIAL_ENV_VAR = "GOOGLE_SERVICE_ACCOUNT"
 _DEFAULT_CREDENTIAL_FILE = "service_account.json"
 
+# Public mode (no login)
+_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+_GOOGLE_PUBLIC_FOLDER_ID = os.getenv("GOOGLE_PUBLIC_FOLDER_ID", "").strip()
+
+# Internal state locks
 _STATE_LOCK = Lock()
 _drive_service: Any = None
 _service_ready = False
@@ -54,35 +41,32 @@ _credential_error: Optional[str] = None
 _last_service_error: Optional[str] = None
 _last_error_source: Optional[str] = None
 
-_STUB_FOLDERS: List[Dict[str, str]] = [
-    {
-        "id": "stub-folder-gateway",
-        "name": "Gateway Villas Phase 1",
-        "mimeType": "application/vnd.google-apps.folder",
-    },
-    {
-        "id": "stub-folder-towers",
-        "name": "Downtown Towers",
-        "mimeType": "application/vnd.google-apps.folder",
-    },
-    {
-        "id": "stub-folder-infra",
-        "name": "Infrastructure Package",
-        "mimeType": "application/vnd.google-apps.folder",
-    },
-]
+# Lazy imports for service-account mode
+try:  # pragma: no cover
+    from google.oauth2 import service_account  # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.http import MediaIoBaseUpload  # type: ignore
+except Exception as import_exc:  # pragma: no cover
+    service_account = None  # type: ignore[assignment]
+    build = None  # type: ignore[assignment]
+    MediaIoBaseUpload = None  # type: ignore[assignment]
+    _IMPORT_ERROR: Optional[BaseException] = import_exc
+else:
+    _IMPORT_ERROR = None
 
+
+# -----------------------------
+# Helpers
+# -----------------------------
 
 def _display_path(path: Path) -> str:
-    """Return a friendly representation of ``path`` for error messages."""
     try:
         return str(path.resolve())
-    except FileNotFoundError:  # pragma: no cover - defensive fallback
+    except FileNotFoundError:
         return str(path.absolute())
 
 
 def _record_error(message: str, *, source: str) -> None:
-    """Persist ``message`` as the latest Drive integration error."""
     global _last_service_error, _last_error_source, _service_ready, _drive_service
     with _STATE_LOCK:
         _last_service_error = message
@@ -92,7 +76,6 @@ def _record_error(message: str, *, source: str) -> None:
 
 
 def _update_credentials_state(path: Path) -> None:
-    """Update bookkeeping related to credential availability."""
     global _credentials_available, _credential_error, _last_service_error, _last_error_source
     exists = path.exists()
     message: Optional[str] = None
@@ -109,38 +92,92 @@ def _update_credentials_state(path: Path) -> None:
             _last_service_error = message
             _last_error_source = "credentials"
             _service_ready = False
-            _drive_service = None
 
 
 def _credentials_path() -> Path:
-    """Return the configured path to the service account file."""
     candidate = os.getenv(_CREDENTIAL_ENV_VAR, _DEFAULT_CREDENTIAL_FILE)
     path = Path(candidate).expanduser()
     _update_credentials_state(path)
     return path
 
 
-def drive_credentials_available() -> bool:
-    """Return ``True`` when the configured credentials file exists."""
-    _credentials_path()
+# -----------------------------
+# Public Mode (API key) helpers
+# -----------------------------
+
+def public_mode_enabled() -> bool:
+    return bool(_GOOGLE_API_KEY and _GOOGLE_PUBLIC_FOLDER_ID)
+
+
+def _drive_api(url: str, params: Dict[str, str]) -> Dict[str, Any]:
+    """Simple GET using urllib so we don't add new deps."""
+    params = {**params, "key": _GOOGLE_API_KEY}  # inject key
+    q = urllib.parse.urlencode(params)
+    full = f"{url}?{q}"
+    with urllib.request.urlopen(full, timeout=20) as resp:  # nosec - public endpoint
+        data = resp.read().decode("utf-8")
+        return json.loads(data)
+
+
+def list_public_children(
+    folder_id: Optional[str] = None, page_size: int = 50
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    List files in a public folder (shared to 'Anyone with the link').
+    Returns (files, next_page_token).
+    """
+    if not public_mode_enabled():
+        return [], None
+
+    parent = folder_id or _GOOGLE_PUBLIC_FOLDER_ID
+    q = f"'{parent}' in parents and trashed = false"
+    url = "https://www.googleapis.com/drive/v3/files"
+    params = {
+        "q": q,
+        "pageSize": str(page_size),
+        "fields": "nextPageToken, files(id,name,mimeType,modifiedTime,webViewLink,iconLink)",
+        "supportsAllDrives": "false",
+        "includeItemsFromAllDrives": "false",
+        "orderBy": "folder,name_natural",
+    }
+    data = _drive_api(url, params)
+    return data.get("files", []), data.get("nextPageToken")
+
+
+def public_diagnostics() -> Dict[str, Any]:
+    """
+    Return a health snapshot for public mode.
+    """
+    diag: Dict[str, Any] = {
+        "mode": "public",
+        "configured": public_mode_enabled(),
+        "folder_id": _GOOGLE_PUBLIC_FOLDER_ID or None,
+        "can_list": False,
+        "error": None,
+        "sample": [],
+    }
+    if not public_mode_enabled():
+        diag["error"] = "Public mode is not configured (missing GOOGLE_API_KEY or GOOGLE_PUBLIC_FOLDER_ID)."
+        return diag
+
+    try:
+        files, _ = list_public_children(page_size=5)
+        diag["can_list"] = True
+        diag["sample"] = files
+    except Exception as exc:  # pragma: no cover
+        diag["error"] = f"Listing failed: {exc!s}"
+    return diag
+
+
+# -----------------------------
+# Service-account mode (private)
+# -----------------------------
+
+def get_drive_service() -> Any:
     with _STATE_LOCK:
-        return _credentials_available
+        if _service_ready and _drive_service is not None:
+            return _drive_service
 
-
-def drive_service_error() -> Optional[str]:
-    """Return the most recent error encountered initialising the service."""
-    with _STATE_LOCK:
-        return _last_service_error
-
-
-def drive_stubbed() -> bool:
-    """Return ``True`` when the Drive integration is operating in stub mode."""
-    with _STATE_LOCK:
-        return not (_service_ready and _credentials_available)
-
-
-def _initialise_service() -> Any:
-    """Construct and cache a Google Drive service instance (service account)."""
     if _IMPORT_ERROR is not None or service_account is None or build is None:
         message = f"Google Drive client libraries unavailable: {_IMPORT_ERROR!s}"
         _record_error(message, source="import")
@@ -158,7 +195,7 @@ def _initialise_service() -> Any:
             str(credentials_path), scopes=_DRIVE_SCOPES
         )
         service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-    except Exception as exc:  # pragma: no cover - exercised via tests
+    except Exception as exc:  # pragma: no cover
         message = f"Failed to initialise Google Drive service: {exc}"
         _record_error(message, source="initialise")
         raise RuntimeError(message) from exc
@@ -173,49 +210,17 @@ def _initialise_service() -> Any:
     return service
 
 
-def get_drive_service() -> Any:
-    """Return a Google Drive service or raise ``RuntimeError`` on failure."""
-    with _STATE_LOCK:
-        if _service_ready and _drive_service is not None:
-            return _drive_service
-    return _initialise_service()
-
-
-def list_project_folders() -> List[Dict[str, Any]]:
-    """List folders from Google Drive, falling back to stub data on failure."""
-    try:
-        service = get_drive_service()
-    except RuntimeError:
-        return list(_STUB_FOLDERS)
-
-    try:
-        response = (
-            service.files()
-            .list(
-                q="mimeType='application/vnd.google-apps.folder' and trashed=false",
-                fields="files(id,name,mimeType)",
-                pageSize=200,
-            )
-            .execute()
-        )
-    except Exception as exc:  # pragma: no cover - defensive network error path
-        _record_error(f"Failed to list Google Drive folders: {exc}", source="list")
-        return list(_STUB_FOLDERS)
-
-    files = response.get("files", [])
-    if isinstance(files, Iterable):
-        return list(files)
-    return list(_STUB_FOLDERS)
-
-
 def upload_to_drive(file_obj: Any) -> str:
-    """Upload ``file_obj`` to Drive or return a stub identifier when stubbed."""
-    try:
-        service = get_drive_service()
-    except RuntimeError:
+    """
+    Upload uses service-account mode only. In public mode this returns a stubbed ID
+    because public+API key cannot write.
+    """
+    if public_mode_enabled() or MediaIoBaseUpload is None:
         return "stubbed-upload-id"
 
-    if MediaIoBaseUpload is None:
+    try:
+        service = get_drive_service()
+    except RuntimeError:
         return "stubbed-upload-id"
 
     if hasattr(file_obj, "file"):
@@ -237,50 +242,7 @@ def upload_to_drive(file_obj: Any) -> str:
             .create(body=metadata, media_body=media, fields="id")
             .execute()
         )
-    except Exception as exc:  # pragma: no cover - defensive network error path
-        _record_error(f"Failed to upload file to Google Drive: {exc}", source="upload")
+    except Exception:
         return "stubbed-upload-id"
 
     return str(response.get("id", "stubbed-upload-id"))
-
-
-# ============================================================================
-# Optional OAuth (user consent) helpers
-# These do not interfere with the service-account flows above.
-# ============================================================================
-
-def _client_config_from_env() -> Dict[str, Any]:
-    """Build an OAuth client config dict from environment variables."""
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
-    if not (client_id and client_secret and redirect_uri):
-        raise RuntimeError(
-            "Missing Google OAuth envs: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REDIRECT_URI"
-        )
-    return {
-        "web": {
-            "client_id": client_id,
-            "project_id": "diriyah-ai",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_secret": client_secret,
-            "redirect_uris": [redirect_uri],
-        }
-    }
-
-
-def oauth_flow():
-    """Create a google_auth_oauthlib Flow from env configuration."""
-    if Flow is None:
-        raise RuntimeError("google-auth-oauthlib is not installed on the backend.")
-    scopes = os.getenv(
-        "GOOGLE_SCOPES",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ).split()
-    cfg = _client_config_from_env()
-    return Flow.from_client_config(
-        cfg,
-        scopes=scopes,
-        redirect_uri=os.getenv("GOOGLE_REDIRECT_URI"),
-    )
