@@ -1,11 +1,16 @@
-"""
-Google Drive integration — supports two modes:
+"""Utilities and stubs for interacting with Google Drive.
 
-1) Service Account mode (OAuth/credentials) — used for private Drive access.
-2) Public Folder + API Key mode — read-only listing of files that are shared
-   publicly on the web. This works without login and is ideal for demos.
+This module provides a very small abstraction layer that the rest of the
+application interacts with. When the real Google client libraries are
+available we attempt to build a Drive service using the configured service
+account file. When the libraries or credentials are unavailable we fall back
+to deterministic stubbed responses that are convenient for local development
+and unit tests.
 
-Diagnostics and scan endpoints will prefer Public mode if it is configured.
+The public helpers intentionally track a bit of internal state so that
+observability surfaces (notably the ``/health`` endpoint) can show whether the
+service is running in stubbed mode as well as the most recent error that
+prevented the real integration from initialising.
 """
 
 from __future__ import annotations
@@ -14,39 +19,14 @@ import io
 import os
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
-import json
-import urllib.parse
-import urllib.request
-
-# -----------------------------
-# Config / Environment
-# -----------------------------
-
-_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
-_CREDENTIAL_ENV_VAR = "GOOGLE_SERVICE_ACCOUNT"
-_DEFAULT_CREDENTIAL_FILE = "service_account.json"
-
-# Public mode (no login)
-_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
-_GOOGLE_PUBLIC_FOLDER_ID = os.getenv("GOOGLE_PUBLIC_FOLDER_ID", "").strip()
-
-# Internal state locks
-_STATE_LOCK = Lock()
-_drive_service: Any = None
-_service_ready = False
-_credentials_available = False
-_credential_error: Optional[str] = None
-_last_service_error: Optional[str] = None
-_last_error_source: Optional[str] = None
-
-# Lazy imports for service-account mode
-try:  # pragma: no cover
+# --- Optional Google client imports (kept import-safe for local/dev) ---------
+try:  # pragma: no cover - exercised indirectly via tests that patch imports
     from google.oauth2 import service_account  # type: ignore
     from googleapiclient.discovery import build  # type: ignore
     from googleapiclient.http import MediaIoBaseUpload  # type: ignore
-except Exception as import_exc:  # pragma: no cover
+except Exception as import_exc:  # pragma: no cover - handled in tests
     service_account = None  # type: ignore[assignment]
     build = None  # type: ignore[assignment]
     MediaIoBaseUpload = None  # type: ignore[assignment]
@@ -54,19 +34,54 @@ except Exception as import_exc:  # pragma: no cover
 else:
     _IMPORT_ERROR = None
 
+# --- Config ------------------------------------------------------------------
+_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+_CREDENTIAL_ENV_VAR = "GOOGLE_SERVICE_ACCOUNT"
+_DEFAULT_CREDENTIAL_FILE = "service_account.json"
 
-# -----------------------------
-# Helpers
-# -----------------------------
+# --- Module state (thread-safe via _STATE_LOCK) ------------------------------
+_STATE_LOCK = Lock()
 
+# NOTE: These are intentionally module-level so we can expose health/diagnostic
+# information elsewhere in the app.
+_drive_service: Any = None
+_service_ready = False
+_credentials_available = False
+_credential_error: Optional[str] = None
+_last_service_error: Optional[str] = None
+_last_error_source: Optional[str] = None
+
+# --- Stub data for local/dev when Drive is unavailable -----------------------
+_STUB_FOLDERS: List[Dict[str, str]] = [
+    {
+        "id": "stub-folder-gateway",
+        "name": "Gateway Villas Phase 1",
+        "mimeType": "application/vnd.google-apps.folder",
+    },
+    {
+        "id": "stub-folder-towers",
+        "name": "Downtown Towers",
+        "mimeType": "application/vnd.google-apps.folder",
+    },
+    {
+        "id": "stub-folder-infra",
+        "name": "Infrastructure Package",
+        "mimeType": "application/vnd.google-apps.folder",
+    },
+]
+
+
+# --- Helpers -----------------------------------------------------------------
 def _display_path(path: Path) -> str:
+    """Return a friendly representation of ``path`` for error messages."""
     try:
         return str(path.resolve())
-    except FileNotFoundError:
+    except FileNotFoundError:  # pragma: no cover - defensive fallback
         return str(path.absolute())
 
 
 def _record_error(message: str, *, source: str) -> None:
+    """Persist ``message`` as the latest Drive integration error."""
     global _last_service_error, _last_error_source, _service_ready, _drive_service
     with _STATE_LOCK:
         _last_service_error = message
@@ -76,15 +91,19 @@ def _record_error(message: str, *, source: str) -> None:
 
 
 def _update_credentials_state(path: Path) -> None:
-    global _credentials_available, _credential_error, _last_service_error, _last_error_source
+    """Update bookkeeping related to credential availability."""
+    global _credentials_available, _credential_error, _last_service_error, _last_error_source, _service_ready, _drive_service
+
     exists = path.exists()
     message: Optional[str] = None
     if not exists:
         message = f"Google Drive credentials not found at {_display_path(path)}"
+
     with _STATE_LOCK:
         _credentials_available = exists
         _credential_error = message
         if exists:
+            # Clear only credential-related previous error
             if _last_error_source == "credentials":
                 _last_service_error = None
                 _last_error_source = None
@@ -92,91 +111,41 @@ def _update_credentials_state(path: Path) -> None:
             _last_service_error = message
             _last_error_source = "credentials"
             _service_ready = False
+            _drive_service = None
 
 
 def _credentials_path() -> Path:
+    """Return the configured path to the service account file."""
     candidate = os.getenv(_CREDENTIAL_ENV_VAR, _DEFAULT_CREDENTIAL_FILE)
     path = Path(candidate).expanduser()
     _update_credentials_state(path)
     return path
 
 
-# -----------------------------
-# Public Mode (API key) helpers
-# -----------------------------
-
-def public_mode_enabled() -> bool:
-    return bool(_GOOGLE_API_KEY and _GOOGLE_PUBLIC_FOLDER_ID)
-
-
-def _drive_api(url: str, params: Dict[str, str]) -> Dict[str, Any]:
-    """Simple GET using urllib so we don't add new deps."""
-    params = {**params, "key": _GOOGLE_API_KEY}  # inject key
-    q = urllib.parse.urlencode(params)
-    full = f"{url}?{q}"
-    with urllib.request.urlopen(full, timeout=20) as resp:  # nosec - public endpoint
-        data = resp.read().decode("utf-8")
-        return json.loads(data)
-
-
-def list_public_children(
-    folder_id: Optional[str] = None, page_size: int = 50
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """
-    List files in a public folder (shared to 'Anyone with the link').
-    Returns (files, next_page_token).
-    """
-    if not public_mode_enabled():
-        return [], None
-
-    parent = folder_id or _GOOGLE_PUBLIC_FOLDER_ID
-    q = f"'{parent}' in parents and trashed = false"
-    url = "https://www.googleapis.com/drive/v3/files"
-    params = {
-        "q": q,
-        "pageSize": str(page_size),
-        "fields": "nextPageToken, files(id,name,mimeType,modifiedTime,webViewLink,iconLink)",
-        "supportsAllDrives": "false",
-        "includeItemsFromAllDrives": "false",
-        "orderBy": "folder,name_natural",
-    }
-    data = _drive_api(url, params)
-    return data.get("files", []), data.get("nextPageToken")
-
-
-def public_diagnostics() -> Dict[str, Any]:
-    """
-    Return a health snapshot for public mode.
-    """
-    diag: Dict[str, Any] = {
-        "mode": "public",
-        "configured": public_mode_enabled(),
-        "folder_id": _GOOGLE_PUBLIC_FOLDER_ID or None,
-        "can_list": False,
-        "error": None,
-        "sample": [],
-    }
-    if not public_mode_enabled():
-        diag["error"] = "Public mode is not configured (missing GOOGLE_API_KEY or GOOGLE_PUBLIC_FOLDER_ID)."
-        return diag
-
-    try:
-        files, _ = list_public_children(page_size=5)
-        diag["can_list"] = True
-        diag["sample"] = files
-    except Exception as exc:  # pragma: no cover
-        diag["error"] = f"Listing failed: {exc!s}"
-    return diag
-
-
-# -----------------------------
-# Service-account mode (private)
-# -----------------------------
-
-def get_drive_service() -> Any:
+# --- Public state accessors ---------------------------------------------------
+def drive_credentials_available() -> bool:
+    """Return ``True`` when the configured credentials file exists."""
+    _credentials_path()  # refresh state
     with _STATE_LOCK:
-        if _service_ready and _drive_service is not None:
-            return _drive_service
+        return _credentials_available
+
+
+def drive_service_error() -> Optional[str]:
+    """Return the most recent error encountered initialising the service."""
+    with _STATE_LOCK:
+        return _last_service_error
+
+
+def drive_stubbed() -> bool:
+    """Return ``True`` when the Drive integration is operating in stub mode."""
+    with _STATE_LOCK:
+        return not (_service_ready and _credentials_available)
+
+
+# --- Service lifecycle --------------------------------------------------------
+def _initialise_service() -> Any:
+    """Construct and cache a Google Drive service instance."""
+    global _drive_service, _service_ready, _last_service_error, _last_error_source
 
     if _IMPORT_ERROR is not None or service_account is None or build is None:
         message = f"Google Drive client libraries unavailable: {_IMPORT_ERROR!s}"
@@ -187,42 +156,79 @@ def get_drive_service() -> Any:
     with _STATE_LOCK:
         credentials_ok = _credentials_available
         credential_problem = _credential_error
+
     if not credentials_ok:
         raise RuntimeError(credential_problem or "Google Drive credentials missing")
 
     try:
         credentials = service_account.Credentials.from_service_account_file(  # type: ignore[union-attr]
-            str(credentials_path), scopes=_DRIVE_SCOPES
+            str(credentials_path),
+            scopes=_DRIVE_SCOPES,
         )
         service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pragma: no cover - defensive network path
         message = f"Failed to initialise Google Drive service: {exc}"
         _record_error(message, source="initialise")
         raise RuntimeError(message) from exc
 
+    # Commit service and clear non-credential errors
     with _STATE_LOCK:
-        global _drive_service, _service_ready, _last_service_error, _last_error_source
         _drive_service = service
         _service_ready = True
         if _last_error_source != "credentials":
             _last_service_error = None
             _last_error_source = None
+
     return service
 
 
-def upload_to_drive(file_obj: Any) -> str:
-    """
-    Upload uses service-account mode only. In public mode this returns a stubbed ID
-    because public+API key cannot write.
-    """
-    if public_mode_enabled() or MediaIoBaseUpload is None:
-        return "stubbed-upload-id"
+def get_drive_service() -> Any:
+    """Return a Google Drive service or raise ``RuntimeError`` on failure."""
+    with _STATE_LOCK:
+        if _service_ready and _drive_service is not None:
+            return _drive_service
+    return _initialise_service()
 
+
+# --- Public operations --------------------------------------------------------
+def list_project_folders() -> List[Dict[str, Any]]:
+    """List folders from Google Drive, falling back to stub data on failure."""
+    try:
+        service = get_drive_service()
+    except RuntimeError:
+        return list(_STUB_FOLDERS)
+
+    try:
+        response = (
+            service.files()
+            .list(
+                q="mimeType='application/vnd.google-apps.folder' and trashed=false",
+                fields="files(id,name,mimeType)",
+                pageSize=200,
+            )
+            .execute()
+        )
+    except Exception as exc:  # pragma: no cover - defensive network error path
+        _record_error(f"Failed to list Google Drive folders: {exc}", source="list")
+        return list(_STUB_FOLDERS)
+
+    files = response.get("files", [])
+    if isinstance(files, Iterable):
+        return list(files)
+    return list(_STUB_FOLDERS)
+
+
+def upload_to_drive(file_obj: Any) -> str:
+    """Upload ``file_obj`` to Drive or return a stub identifier when stubbed."""
     try:
         service = get_drive_service()
     except RuntimeError:
         return "stubbed-upload-id"
 
+    if MediaIoBaseUpload is None:
+        return "stubbed-upload-id"
+
+    # Support Starlette/FastAPI UploadFile and plain file-like objects
     if hasattr(file_obj, "file"):
         content = file_obj.file.read()
         file_obj.file.seek(0)
@@ -242,7 +248,8 @@ def upload_to_drive(file_obj: Any) -> str:
             .create(body=metadata, media_body=media, fields="id")
             .execute()
         )
-    except Exception:
+    except Exception as exc:  # pragma: no cover - defensive network error path
+        _record_error(f"Failed to upload file to Google Drive: {exc}", source="upload")
         return "stubbed-upload-id"
 
     return str(response.get("id", "stubbed-upload-id"))
