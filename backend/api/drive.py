@@ -1,58 +1,67 @@
-from fastapi import APIRouter, UploadFile, File, Request
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import APIRouter, UploadFile, File, Query, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from backend.services.google_drive import upload_to_drive, oauth_flow
+from backend.services.google_drive import (
+    upload_to_drive,          # stubbed in API-key mode
+    diagnostics as drive_diag,
+    list_folder_items,
+    download_file_bytes,
+)
 
 router = APIRouter()
 
-# ------------------ Existing upload endpoint (service account) ----------------
+# ------------------ Upload (stubbed in API-key mode) ------------------------
 
 @router.post("/drive/upload")
 async def drive_upload(file: UploadFile = File(...)):
     """
-    Upload a file to Google Drive using the service-account integration.
-    Falls back to a stubbed ID if the backend is running in stub mode.
+    Upload is NOT supported in API-key public-folder mode.
+    We keep this endpoint to avoid breaking callers; it returns a fixed token.
     """
     file_id = upload_to_drive(file)
     return {"file_id": file_id}
 
 
-# ------------------ NEW: OAuth endpoints (user consent) ----------------------
+# ------------------ Diagnostics & Public Folder Listing ---------------------
 
-@router.get("/drive/oauth2start")
-def drive_oauth2start():
+@router.get("/drive/diagnostics")
+def drive_diagnostics():
     """
-    Kick off Google OAuth by redirecting the user to the consent screen.
-    Uses GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI and GOOGLE_SCOPES from env.
+    Returns current Drive integration status.
+    Expected to include:
+      - mode: "api-key-public-folder-readonly"
+      - stubbed: bool
+      - has_api_key / has_public_folder_id
+      - public_folder_id (short)
+      - last_error (if any)
     """
-    flow = oauth_flow()
-    auth_url, state = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent",
-    )
-    # You may want to set a secure cookie with `state` if you intend to verify it.
-    return RedirectResponse(auth_url)
+    return drive_diag()
 
 
-@router.get("/drive/oauth2callback")
-def drive_oauth2callback(request: Request):
+@router.get("/drive/list")
+def drive_list(
+    page_token: str | None = Query(default=None, description="Drive page token"),
+    page_size: int = Query(default=100, ge=1, le=1000),
+):
     """
-    Handle Google OAuth redirect, exchange the auth code for tokens.
-    For production, store the credentials securely (DB/KMS). Here we return them
-    so you can verify the flow works end-to-end.
+    Lists files from the configured PUBLIC folder using only an API key.
+    The folder AND items must be shared as: Anyone with the link → Viewer.
     """
-    flow = oauth_flow()
-    flow.fetch_token(authorization_response=str(request.url))
-    creds = flow.credentials
+    data = list_folder_items(page_token=page_token, page_size=page_size)
+    return JSONResponse(data)
 
-    # NOTE: Do NOT return tokens in production. Persist them securely and return a success page.
-    return JSONResponse(
-        {
-            "access_token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "scopes": creds.scopes,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-        }
-    )
+
+# ------------------ Optional: direct download by file_id --------------------
+
+@router.get("/drive/download/{file_id}")
+def drive_download(file_id: str):
+    """
+    Streams the raw bytes of a publicly shared file (alt=media).
+    Useful for simple fetches without exposing your API key to the browser.
+    """
+    try:
+        content = download_file_bytes(file_id)
+    except Exception as exc:  # propagate a clean 502/500 instead of stack trace
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return StreamingResponse(iter([content]), media_type="application/octet-stream")
