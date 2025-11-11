@@ -5,8 +5,9 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import your Drive router (defined in backend/api/drive.py)
+# Routers
 from backend.api.drive import router as drive_router
+from backend.api.workspace import router as workspace_router
 
 APP_NAME = os.getenv("APP_NAME", "Diriyah AI Demo")
 
@@ -18,8 +19,6 @@ app = FastAPI(
 )
 
 # --------------------------- CORS (adjust as needed) ---------------------------
-
-# Allow localhost (dev) and onrender.com (prod)
 allowed_origins = [
     "http://localhost",
     "http://localhost:3000",
@@ -27,13 +26,10 @@ allowed_origins = [
     "http://127.0.0.1:3000",
 ]
 
-# If running on Render, also allow the public URL
 render_external_url = os.getenv("RENDER_EXTERNAL_URL")
 if render_external_url:
     allowed_origins.append(render_external_url)
-    # Also allow wildcard *.onrender.com if you prefer:
-    # NOTE: For stricter security, list your exact host instead of wildcard.
-    allowed_origins.append("https://*.onrender.com")
+    allowed_origins.append("https://*.onrender.com")  # optional wildcard
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,16 +40,14 @@ app.add_middleware(
 )
 
 # ----------------------------- Routers mounting --------------------------------
-
-# All Drive routes end up as:
-#   /api/drive/diagnostics
-#   /api/drive/list
-#   /api/drive/download/{file_id}
-#   /api/drive/upload
+# Drive endpoints:
+#   /api/drive/diagnostics, /api/drive/list, /api/drive/download/{file_id}, /api/drive/upload
 app.include_router(drive_router, prefix="/api")
 
-# ------------------------------- Health & root ---------------------------------
+# Workspace endpoints (frontend expects /api/workspace/*)
+app.include_router(workspace_router, prefix="/api")
 
+# ------------------------------- Health & root ---------------------------------
 @app.get("/healthz", tags=["System"])
 def healthz():
     return {"status": "ok", "service": APP_NAME}
