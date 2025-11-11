@@ -12,12 +12,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
 
+# NOTE: main.py mounts this router with prefix="/api",
+# so all routes below end up as:
+#   /api/workspace/shell
+#   /api/workspace/active-project
+#   /api/workspace/chats ...
 router = APIRouter()
 
 
 class ProjectModel(BaseModel):
     """Project details exposed to the frontend shell."""
-
     id: str
     name: str
     location: str
@@ -26,7 +30,6 @@ class ProjectModel(BaseModel):
 
 class ChatSummaryModel(BaseModel):
     """Metadata describing a conversation in the sidebar."""
-
     id: str
     title: str
     preview: str
@@ -39,7 +42,6 @@ class ChatSummaryModel(BaseModel):
 
 class ChatGroupModel(BaseModel):
     """Sidebar grouping of conversations."""
-
     id: str
     label: str
     chats: List[ChatSummaryModel]
@@ -50,7 +52,6 @@ class ChatGroupModel(BaseModel):
 
 class MessageModel(BaseModel):
     """Representation of a single chat message."""
-
     id: str
     role: str
     author: str
@@ -61,7 +62,6 @@ class MessageModel(BaseModel):
 
 class TimelineEntryModel(BaseModel):
     """A chronological block of messages."""
-
     id: str
     label: str
     messages: List[MessageModel]
@@ -69,7 +69,6 @@ class TimelineEntryModel(BaseModel):
 
 class ConversationContextModel(BaseModel):
     """Supplementary context surfaced in the insights panel."""
-
     summary: List[str]
     tasks: List[str]
     files: List[str]
@@ -78,7 +77,6 @@ class ConversationContextModel(BaseModel):
 
 class ConversationModel(BaseModel):
     """Detailed conversation payload consumed by the chat workspace."""
-
     id: str
     title: str
     last_activity: str = Field(alias="lastActivity")
@@ -91,7 +89,6 @@ class ConversationModel(BaseModel):
 
 class WorkspaceShellModel(BaseModel):
     """Aggregate data required to render the application shell."""
-
     projects: List[ProjectModel]
     chat_groups: List[ChatGroupModel] = Field(alias="chatGroups")
     conversations: Dict[str, ConversationModel]
@@ -104,7 +101,6 @@ class WorkspaceShellModel(BaseModel):
 
 class ConversationUpdateModel(BaseModel):
     """State update emitted after mutating chat data."""
-
     conversation: ConversationModel
     chat_groups: List[ChatGroupModel] = Field(alias="chatGroups")
 
@@ -113,45 +109,38 @@ class ConversationUpdateModel(BaseModel):
 
 class MessageCreateRequest(BaseModel):
     """Payload captured when a user submits a new message."""
-
     body: str
     project_id: str | None = Field(default=None, alias="projectId")
 
 
 class AttachmentCreateRequest(BaseModel):
     """Attachment metadata registered with a conversation."""
-
     file_name: str = Field(alias="fileName")
 
 
 class MicrophoneStateRequest(BaseModel):
     """Toggle the microphone capture state."""
-
     enabled: bool
 
 
 class CreateChatRequest(BaseModel):
     """Provision a new draft conversation for a project."""
-
     project_id: str = Field(alias="projectId")
 
 
 class ActiveProjectRequest(BaseModel):
     """Update the active project used to scope workspace calls."""
-
     project_id: str = Field(alias="projectId")
 
 
 class MessageActionRequest(BaseModel):
     """Capture a user action taken on a message."""
-
     action: str
 
 
 @dataclass
 class WorkspaceState:
     """In-memory workspace backing store for demo interactions."""
-
     projects: List[ProjectModel]
     chat_groups: List[ChatGroupModel]
     conversations: Dict[str, ConversationModel]
@@ -204,7 +193,7 @@ class WorkspaceState:
         with self._lock:
             try:
                 return self.conversations[chat_id]
-            except KeyError as exc:  # pragma: no cover - defensive guard
+            except KeyError as exc:
                 raise HTTPException(status_code=404, detail=f"Conversation '{chat_id}' not found") from exc
 
     def register_attachment(self, chat_id: str, file_name: str) -> ConversationModel:
@@ -223,13 +212,12 @@ class WorkspaceState:
             timestamp=self._now_display(),
             body=body,
         )
-
         with self._lock:
             conversation = self.get_conversation(chat_id)
             conversation.last_activity = f"{message.timestamp} • Posted update"
             if conversation.timeline:
                 conversation.timeline[0].messages.append(message)
-            else:  # pragma: no cover - defensive guard
+            else:
                 conversation.timeline.append(
                     TimelineEntryModel(id="live", label="Live", messages=[message])
                 )
@@ -661,14 +649,12 @@ _STATE = _seed_state()
 @router.get("/workspace/shell", response_model=WorkspaceShellModel)
 def get_workspace_shell() -> WorkspaceShellModel:
     """Return the aggregated application shell state."""
-
     return _STATE.snapshot()
 
 
 @router.post("/workspace/active-project", response_model=WorkspaceShellModel)
 def set_active_project(request: ActiveProjectRequest) -> WorkspaceShellModel:
     """Persist the active project selection and emit the new shell state."""
-
     _STATE.set_active_project(request.project_id)
     return _STATE.snapshot()
 
@@ -676,7 +662,6 @@ def set_active_project(request: ActiveProjectRequest) -> WorkspaceShellModel:
 @router.post("/workspace/chats", response_model=ConversationUpdateModel)
 def create_chat(request: CreateChatRequest) -> ConversationUpdateModel:
     """Create a new draft conversation scoped to the selected project."""
-
     conversation = _STATE.create_chat(request.project_id)
     return ConversationUpdateModel(conversation=conversation, chat_groups=_STATE.chat_groups)
 
@@ -684,7 +669,6 @@ def create_chat(request: CreateChatRequest) -> ConversationUpdateModel:
 @router.post("/workspace/chats/{chat_id}/read", response_model=ConversationUpdateModel)
 def mark_chat_read(chat_id: str) -> ConversationUpdateModel:
     """Set a conversation as the active thread and reset its unread badge."""
-
     conversation = _STATE.set_active_chat(chat_id)
     return ConversationUpdateModel(conversation=conversation, chat_groups=_STATE.chat_groups)
 
@@ -692,10 +676,8 @@ def mark_chat_read(chat_id: str) -> ConversationUpdateModel:
 @router.post("/workspace/chats/{chat_id}/messages", response_model=ConversationUpdateModel)
 def submit_message(chat_id: str, request: MessageCreateRequest) -> ConversationUpdateModel:
     """Capture a user-authored message in the conversation timeline."""
-
     if not request.body.strip():
         raise HTTPException(status_code=400, detail="Message body cannot be empty")
-
     conversation = _STATE.create_message(chat_id, request.body)
     return ConversationUpdateModel(conversation=conversation, chat_groups=_STATE.chat_groups)
 
@@ -703,17 +685,14 @@ def submit_message(chat_id: str, request: MessageCreateRequest) -> ConversationU
 @router.post("/workspace/chats/{chat_id}/attachments", response_model=ConversationModel)
 def register_attachment(chat_id: str, request: AttachmentCreateRequest) -> ConversationModel:
     """Associate an uploaded file with a conversation."""
-
     if not request.file_name.strip():
         raise HTTPException(status_code=400, detail="File name cannot be empty")
-
     return _STATE.register_attachment(chat_id, request.file_name)
 
 
 @router.post("/workspace/microphone", response_model=MicrophoneStateRequest)
 def toggle_microphone(request: MicrophoneStateRequest) -> MicrophoneStateRequest:
     """Update the microphone capture state."""
-
     enabled = _STATE.set_microphone(request.enabled)
     return MicrophoneStateRequest(enabled=enabled)
 
@@ -721,11 +700,8 @@ def toggle_microphone(request: MicrophoneStateRequest) -> MicrophoneStateRequest
 @router.put("/workspace/messages/{message_id}/action")
 def record_message_action(message_id: str, request: MessageActionRequest) -> dict[str, str]:
     """Record a lightweight audit trail for message-level quick actions."""
-
     if not request.action.strip():
         raise HTTPException(status_code=400, detail="Action must be provided")
-
-    # For demo purposes we log the action in the primary conversation if it exists.
     summary = f"{datetime.utcnow().strftime('%H:%M')} Action '{request.action}' recorded for message {message_id}."
     _STATE.log_assistant_action(_STATE.active_chat_id, summary)
     return {"status": "recorded"}
@@ -733,6 +709,5 @@ def record_message_action(message_id: str, request: MessageActionRequest) -> dic
 
 def _reset_state_for_tests() -> None:
     """Re-initialise the workspace state for isolated testing."""
-
     global _STATE
     _STATE = _seed_state()
