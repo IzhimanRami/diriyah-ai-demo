@@ -9,3 +9,7 @@ sentence-transformers==2.7.0
 faiss-cpu==1.8.0.post1
 textract==1.6.5
 ultralytics==8.2.65
+requests
+chromadb
+pdfminer.six
+prometheus_client
