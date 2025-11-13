@@ -27,6 +27,7 @@ from backend.api import (
     users,
     vision,
     workspace,
+    drive_public,
 )
 from backend.services.google_drive import (
     drive_credentials_available,
@@ -101,6 +102,7 @@ for module, tag in (
     (drive_diagnose, "Drive"),
     (users, "Users"),
     (workspace, "Workspace"),
+    (drive_public, "Drive Public"),
 ):
     _include_router_if_available(module, tag)
 
