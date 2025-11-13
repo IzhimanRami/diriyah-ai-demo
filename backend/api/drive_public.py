@@ -3,7 +3,7 @@ from typing import List, Dict
 from fastapi import APIRouter, HTTPException, Query
 from .ingest_utils import extract_text_and_metadata, upsert_to_chroma
 
-router = APIRouter(prefix="/api/drive", tags=["drive"])
+router = APIRouter(prefix="/drive", tags=["drive"])
 
 GDRIVE_API_KEY = os.getenv("GDRIVE_API_KEY")
 BASE = "https://www.googleapis.com/drive/v3"
