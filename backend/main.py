@@ -5,6 +5,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+# All existing routers
 from backend.api import (
     advanced_intelligence,
     alerts,
@@ -29,6 +31,10 @@ from backend.api import (
     workspace,
     drive_public,
 )
+
+# ⬇️ NEW — IMPORT THE INGEST ROUTER
+from backend.api.drive_ingest import router as drive_ingest_router
+
 from backend.services.google_drive import (
     drive_credentials_available,
     drive_service_error,
@@ -37,8 +43,11 @@ from backend.services.google_drive import (
 
 logger = logging.getLogger(__name__)
 
-
+# ------------------------------------------------------------------------------
+# FastAPI Initialization
+# ------------------------------------------------------------------------------
 app = FastAPI(title="Diriyah Brain AI", version="v1.24")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,16 +56,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ------------------------------------------------------------------------------
+# Frontend Static Path Setup
+# ------------------------------------------------------------------------------
 _BASE_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _BASE_DIR.parent
 _FRONTEND_DIST_DIR = _PROJECT_ROOT / "frontend_dist"
 _FRONTEND_PUBLIC_DIR = _PROJECT_ROOT / "frontend" / "public"
 
+# Static assets
 if _FRONTEND_PUBLIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=_FRONTEND_PUBLIC_DIR), name="static")
 else:
     logger.warning("frontend public assets directory %s is missing", _FRONTEND_PUBLIC_DIR)
 
+# Built frontend bundle
 if _FRONTEND_DIST_DIR.exists():
     app.mount(
         "/assets",
@@ -72,9 +86,11 @@ if not _INDEX_HTML.exists():
     _INDEX_HTML = None
 
 
+# ------------------------------------------------------------------------------
+# Auto-register all main routers
+# ------------------------------------------------------------------------------
 def _include_router_if_available(module, tag: str) -> None:
-    """Register the router exposed by ``module`` when present."""
-
+    """Register the router exposed by the module if it exists."""
     router = getattr(module, "router", None)
     if router is not None:
         app.include_router(router, prefix="/api", tags=[tag])
@@ -107,6 +123,15 @@ for module, tag in (
     _include_router_if_available(module, tag)
 
 
+# ------------------------------------------------------------------------------
+# ⬇️ NEW — REGISTER THE DRIVE INGEST API ENDPOINT
+# ------------------------------------------------------------------------------
+app.include_router(drive_ingest_router, prefix="/api", tags=["Drive Ingest"])
+
+
+# ------------------------------------------------------------------------------
+# Root → Serve Frontend
+# ------------------------------------------------------------------------------
 @app.get("/", include_in_schema=False)
 async def serve_frontend() -> FileResponse:
     if _INDEX_HTML is None:
@@ -114,6 +139,9 @@ async def serve_frontend() -> FileResponse:
     return FileResponse(_INDEX_HTML, media_type="text/html")
 
 
+# ------------------------------------------------------------------------------
+# Health Check
+# ------------------------------------------------------------------------------
 @app.get("/health")
 def health_check():
     error = drive_service_error()
