@@ -1,14 +1,18 @@
 import os, tempfile
 from typing import Tuple, Dict, List
-from chromadb import HttpClient
 from chromadb.utils import embedding_functions
 from pdfminer.high_level import extract_text as pdf_extract
+from chromadb.config import Settings
+from chromadb import Client
 
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "diriyah")
 
-_client = HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+settings = Settings(
+    chroma_db_impl="duckdb+parquet",
+    persist_directory="/app/storage/chroma"
+)
+
+_client = Client(settings)
 _collection = _client.get_or_create_collection(CHROMA_COLLECTION)
 _embedder = embedding_functions.DefaultEmbeddingFunction()
 
