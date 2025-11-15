@@ -6,6 +6,9 @@ from fastapi import APIRouter, Form
 from backend.services.intent_router import IntentRouter
 from backend.services.vector_memory import get_active_project
 
+# ⬇️ NEW: import the global Chroma collection from ingest.py
+from backend.services.ingest import _collection as chroma_collection
+
 router = APIRouter()
 intent_router = IntentRouter()
 
@@ -24,6 +27,11 @@ async def chat(message: str = Form(...)) -> dict[str, Any]:
     elif active is not None:
         project_id = getattr(active, "id", None)
         collection = getattr(active, "collection", None)
+
+    # ⬇️ NEW: if no collection is attached to the active project,
+    # fall back to the global Chroma collection which we filled from Drive.
+    if collection is None:
+        collection = chroma_collection
 
     intent_result = intent_router.route(message, project_id=project_id)
 
