@@ -1,26 +1,26 @@
-import os, tempfile
+import os
+import tempfile
 from typing import Tuple, Dict, List
+
+from chromadb import PersistentClient
 from chromadb.utils import embedding_functions
 from pdfminer.high_level import extract_text as pdf_extract
-from chromadb.config import Settings
-from chromadb import Client
 
+# Name of the Chroma collection (can be overridden with env var)
 CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "diriyah")
 
-settings = Settings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory="/app/storage/chroma"
-)
-
-_client = Client(settings)
-_collection = _client.get_or_create_collection(CHROMA_COLLECTION)
+# Use embedded Chroma, persisted on disk inside the container
+_client = PersistentClient(path="/app/storage/chroma")
+_collection = _client.get_or_create_collection(name=CHROMA_COLLECTION)
 _embedder = embedding_functions.DefaultEmbeddingFunction()
+
 
 def _try_decode(b: bytes) -> str:
     try:
         return b.decode("utf-8")
     except Exception:
         return b.decode("latin-1", errors="ignore")
+
 
 def extract_text_and_metadata(binary: bytes, drive_file: Dict) -> Tuple[str, Dict]:
     name = drive_file.get("name", "").lower()
@@ -45,11 +45,19 @@ def extract_text_and_metadata(binary: bytes, drive_file: Dict) -> Tuple[str, Dic
     }
     return text, meta
 
+
 def upsert_to_chroma(docs: List[tuple]):
     if not docs:
         return
+
     ids = [d[1]["gdrive_id"] for d in docs]
     documents = [d[0] for d in docs]
     metadatas = [d[1] for d in docs]
     embeddings = _embedder(documents)
-    _collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+
+    _collection.upsert(
+        ids=ids,
+        documents=documents,
+        metadatas=metadatas,
+        embeddings=embeddings,
+    )
