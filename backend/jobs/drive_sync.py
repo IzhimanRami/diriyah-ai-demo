@@ -1,7 +1,7 @@
 # backend/jobs/drive_sync.py
 
 from backend.services.drive_list import list_drive_files, download_file
-from backend.services.ingest import extract_text_and_metadata, upsert_to_chroma
+from backend.api.ingest_utils import extract_text_and_metadata, upsert_to_chroma
 
 
 def ingest_folder(folder_id: str):
