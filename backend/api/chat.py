@@ -7,7 +7,7 @@ from backend.services.intent_router import IntentRouter
 from backend.services.vector_memory import get_active_project
 
 # ⬇️ NEW: import the global Chroma collection from ingest.py
-from backend.api.ingest import _collection as chroma_collection
+from backend.api.ingest_utils import _collection as chroma_collection
 
 router = APIRouter()
 intent_router = IntentRouter()
