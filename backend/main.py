@@ -5,11 +5,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from backend.api.drive_debug import router as drive_debug_router
 
-app.include_router(drive_debug_router, prefix="/api")
-
-# All existing routers
+# All existing router modules
 from backend.api import (
     advanced_intelligence,
     alerts,
@@ -35,7 +32,8 @@ from backend.api import (
     drive_public,
 )
 
-# ⬇️ NEW — IMPORT THE INGEST ROUTER
+# NEW – individual routers
+from backend.api.drive_debug import router as drive_debug_router
 from backend.api.drive_ingest import router as drive_ingest_router
 
 from backend.services.google_drive import (
@@ -71,7 +69,9 @@ _FRONTEND_PUBLIC_DIR = _PROJECT_ROOT / "frontend" / "public"
 if _FRONTEND_PUBLIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=_FRONTEND_PUBLIC_DIR), name="static")
 else:
-    logger.warning("frontend public assets directory %s is missing", _FRONTEND_PUBLIC_DIR)
+    logger.warning(
+        "frontend public assets directory %s is missing", _FRONTEND_PUBLIC_DIR
+    )
 
 # Built frontend bundle
 if _FRONTEND_DIST_DIR.exists():
@@ -87,7 +87,6 @@ else:
 if not _INDEX_HTML.exists():
     logger.warning("frontend index file %s is missing", _INDEX_HTML)
     _INDEX_HTML = None
-
 
 # ------------------------------------------------------------------------------
 # Auto-register all main routers
@@ -125,12 +124,11 @@ for module, tag in (
 ):
     _include_router_if_available(module, tag)
 
-
 # ------------------------------------------------------------------------------
-# ⬇️ NEW — REGISTER THE DRIVE INGEST API ENDPOINT
+# Extra routers: Drive Debug & Drive Ingest
 # ------------------------------------------------------------------------------
+app.include_router(drive_debug_router, prefix="/api", tags=["Drive Debug"])
 app.include_router(drive_ingest_router, prefix="/api", tags=["Drive Ingest"])
-
 
 # ------------------------------------------------------------------------------
 # Root → Serve Frontend
@@ -138,9 +136,10 @@ app.include_router(drive_ingest_router, prefix="/api", tags=["Drive Ingest"])
 @app.get("/", include_in_schema=False)
 async def serve_frontend() -> FileResponse:
     if _INDEX_HTML is None:
-        raise HTTPException(status_code=404, detail="Frontend assets are not available")
+        raise HTTPException(
+            status_code=404, detail="Frontend assets are not available"
+        )
     return FileResponse(_INDEX_HTML, media_type="text/html")
-
 
 # ------------------------------------------------------------------------------
 # Health Check
