@@ -1,92 +1,48 @@
-"""Compatibility wrappers for Google Drive workflows used by demo services."""
+# backend/services/drive_service.py
 
-from __future__ import annotations
+import os
+from typing import List, Dict
 
-import mimetypes
-import tempfile
-from pathlib import Path
-from typing import Any, Dict, Iterable, List
+import requests
 
-from . import google_drive
-
-try:  # pragma: no cover - exercised indirectly when googleapiclient is installed
-    from googleapiclient.http import MediaIoBaseDownload  # type: ignore
-except Exception:  # pragma: no cover - environments without googleapiclient
-    MediaIoBaseDownload = None  # type: ignore[assignment]
+GDRIVE_API_KEY = os.getenv("GDRIVE_API_KEY")
+BASE_URL = "https://www.googleapis.com/drive/v3/files"
 
 
-def list_files() -> List[Dict[str, Any]]:
-    """Expose project folders to legacy callers that expect a list endpoint."""
-
-    folders = google_drive.list_project_folders()
-    if isinstance(folders, Iterable):
-        return list(folders)
-    return []
+def _ensure_api_key() -> str:
+    if not GDRIVE_API_KEY:
+        raise RuntimeError("GDRIVE_API_KEY env var is missing")
+    return GDRIVE_API_KEY
 
 
-class _UploadShim:
-    """Minimal adapter so the Drive helper accepts a filesystem path."""
+def list_files_in_folder(folder_id: str) -> List[Dict]:
+    """
+    List files in a public Google Drive folder using an API key.
+    """
+    api_key = _ensure_api_key()
 
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        self.file = path.open("rb")
-        self.filename = path.name
-        guessed, _ = mimetypes.guess_type(path.name)
-        self.content_type = guessed or "application/octet-stream"
+    params = {
+        "q": f"'{folder_id}' in parents and trashed=false",
+        "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
+        "key": api_key,
+    }
 
-    def close(self) -> None:
-        try:
-            self.file.close()
-        except Exception:
-            pass
+    resp = requests.get(BASE_URL, params=params, timeout=30)
+    resp.raise_for_status()
 
-
-def upload_file(file_path: str) -> str:
-    """Upload ``file_path`` to Drive or return a stub identifier when offline."""
-
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File does not exist: {path}")
-
-    shim = _UploadShim(path)
-    try:
-        return google_drive.upload_to_drive(shim)
-    finally:
-        shim.close()
+    data = resp.json()
+    return data.get("files", [])
 
 
-def _write_stub(file_id: str, *, extension: str | None = None) -> str:
-    """Persist a lightweight placeholder file so downstream parsers can run."""
+def download_file(file_id: str) -> bytes:
+    """
+    Download the raw bytes of a file using the same API key.
+    """
+    api_key = _ensure_api_key()
 
-    suffix = extension or ".txt"
-    with tempfile.NamedTemporaryFile("w", delete=False, prefix=f"stub-{file_id}-", suffix=suffix) as handle:
-        handle.write(f"Stub data for Drive file {file_id}\n")
-        return handle.name
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+    params = {"alt": "media", "key": api_key}
 
-
-def download_file(file_id: str, *, extension: str | None = None) -> str:
-    """Download a Drive file for local processing or return a stub path."""
-
-    try:
-        service = google_drive.get_drive_service()
-    except RuntimeError:
-        return _write_stub(file_id, extension=extension)
-
-    if MediaIoBaseDownload is None:
-        return _write_stub(file_id, extension=extension)
-
-    request = service.files().get_media(fileId=file_id)
-    suffix = extension or ""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-            downloader = MediaIoBaseDownload(handle, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            handle.flush()
-            return handle.name
-    except Exception:  # pragma: no cover - defensive network path
-        return _write_stub(file_id, extension=extension)
-
-
-__all__ = ["list_files", "upload_file", "download_file"]
+    resp = requests.get(url, params=params, stream=True, timeout=60)
+    resp.raise_for_status()
+    return resp.content
