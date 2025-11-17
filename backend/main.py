@@ -5,6 +5,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from backend.api.drive_debug import router as drive_debug_router
+
+app.include_router(drive_debug_router, prefix="/api")
 
 # All existing routers
 from backend.api import (
