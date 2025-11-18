@@ -46,3 +46,16 @@ def download_file(file_id: str) -> bytes:
     resp = requests.get(url, params=params, stream=True, timeout=60)
     resp.raise_for_status()
     return resp.content
+    # ---------------------------------------------------------------------------
+# Backwards-compat wrapper for old code (drive_scan, etc.)
+# ---------------------------------------------------------------------------
+
+def list_files(folder_id: str, *args, **kwargs):
+    """
+    Legacy wrapper used by drive_scan / other old endpoints.
+
+    We now use list_files_in_folder internally, but older modules still
+    import `list_files`. This keeps them working without changing their code.
+    """
+    return list_files_in_folder(folder_id)
+
