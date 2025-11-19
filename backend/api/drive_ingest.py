@@ -5,9 +5,13 @@ import logging
 import os
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+
+# We re-use the in-memory workspace state so that ingest
+# can attach files to a specific conversation.
+from backend.api import workspace
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +28,17 @@ _GOOGLE_API_KEY = (
     or "AIzaSyCt67CzFTVc-G0O6CuZZLs60uiaBsOXQtc"  # <- fallback for this demo
 )
 
+if not _GOOGLE_API_KEY:
+    logger.warning("No Google Drive API key configured – Drive ingest will fail.")
+
 
 def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
     """
     Call the public Google Drive v3 API using an API key, listing all files
     in the given folder. This mirrors the URL you tested in the browser.
+
+    IMPORTANT: We do NOT filter by mimeType here – all file types are kept
+    in the demo (pdf, pptx, docx, xlsx, etc.).
     """
     if not _GOOGLE_API_KEY:
         raise RuntimeError("Google Drive API key is not configured")
@@ -65,6 +75,23 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
 
 
 # ------------------------------------------------------------------------------
+# In-memory mapping: chatId -> drive folderId
+# ------------------------------------------------------------------------------
+
+_CHAT_FOLDER_BINDINGS: Dict[str, str] = {}
+
+
+def get_folder_for_chat(chat_id: str) -> Optional[str]:
+    """Helper other modules (chat Q&A) can use."""
+    return _CHAT_FOLDER_BINDINGS.get(chat_id)
+
+
+def list_files_for_folder(folder_id: str) -> List[Dict[str, Any]]:
+    """Small public wrapper so other modules don’t call the private helper."""
+    return _fetch_drive_files_via_api_key(folder_id)
+
+
+# ------------------------------------------------------------------------------
 # Ingest endpoint
 # ------------------------------------------------------------------------------
 
@@ -72,22 +99,47 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
 @router.api_route("/drive/ingest", methods=["POST", "GET"])
 async def ingest_drive_folder(
     folder_id: str = Query(..., alias="folderId"),
+    chat_id: str | None = Query(default=None, alias="chatId"),
 ):
     """
     Ingest a Google Drive folder.
 
     For now this:
       * fetches the file list via API key
+      * (optionally) associates the folder with a chatId
+      * (optionally) pushes the file *names* into that chat's context.files
       * returns them as JSON so we can confirm everything works
 
-    Later we can plug in the vector DB / Chroma logic on top of this list.
+    Later we can plug in the vector DB / RAG logic on top of this list.
     """
-    logger.info("Starting ingest for folder %s", folder_id)
+    logger.info("Starting ingest for folder %s (chatId=%s)", folder_id, chat_id)
 
     try:
         files = _fetch_drive_files_via_api_key(folder_id)
+
+        # If a chat ID is provided, remember that this chat is bound to this folder
+        # and surface the file names in the workspace sidebar.
+        if chat_id:
+            _CHAT_FOLDER_BINDINGS[chat_id] = folder_id
+
+            # Try to register each file as an "attachment" so it appears
+            # under the Files panel for that conversation.
+            for f in files:
+                name = f.get("name")
+                if not name:
+                    continue
+                try:
+                    workspace._STATE.register_attachment(chat_id, name)
+                except Exception:  # pragma: no cover - defensive guard
+                    logger.exception(
+                        "Failed to register attachment '%s' for chat '%s'",
+                        name,
+                        chat_id,
+                    )
+
         return {
             "folderId": folder_id,
+            "chatId": chat_id,
             "fileCount": len(files),
             "files": files,
         }
@@ -99,3 +151,10 @@ async def ingest_drive_folder(
             status_code=500,
             detail=f"Drive ingest failed: {exc}",
         ) from exc
+
+
+__all__ = [
+    "router",
+    "get_folder_for_chat",
+    "list_files_for_folder",
+]
