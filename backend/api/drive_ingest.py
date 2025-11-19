@@ -42,7 +42,7 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
 
     # EXACT same query as your working browser URL:
     # q='FOLDER_ID' in parents and trashed=false
-    query_str = f"'{folder_id}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'"
+    query_str = f"'{folder_id}' in parents and trashed=false"
 
     # Build URL *manually* to avoid any surprises
     base_url = "https://www.googleapis.com/drive/v3/files"
