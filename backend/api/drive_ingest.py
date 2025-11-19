@@ -19,11 +19,10 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 # In production, move this to an env var and REMOVE the hard-coded fallback.
-_GOOGLE_API_KEY = (
-    os.environ.get("GOOGLE_DRIVE_API_KEY")
-    or os.environ.get("GOOGLE_API_KEY")
-    or "AIzaSyCt67CzFTVc-G0O6CuZZLs60uiaBsOXQtc"  # demo fallback
-)
+_GOOGLE_API_KEY = os.environ.get("GOOGLE_DRIVE_API_KEY")
+
+if not _GOOGLE_API_KEY:
+    raise RuntimeError("GOOGLE_DRIVE_API_KEY env var is not set")
 
 _DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
 
