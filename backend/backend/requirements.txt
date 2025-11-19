@@ -13,3 +13,4 @@ requests
 chromadb
 pdfminer.six
 prometheus_client
+httpx
