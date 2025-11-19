@@ -14,40 +14,54 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Base URL for Drive v3
+_DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
+
+
 # ---------------------------------------------------------------------------
-# Google Drive API helper using API KEY (no service account)
+# Helpers
 # ---------------------------------------------------------------------------
 
-_GOOGLE_API_KEY = os.environ.get("GOOGLE_DRIVE_API_KEY")
+def _get_api_key() -> str:
+    """
+    Read the Google API key from the environment.
 
-if not _GOOGLE_API_KEY:
-    # Do NOT crash the app on import – just warn.
-    logger.warning(
-        "GOOGLE_DRIVE_API_KEY env var is not set. "
-        "Drive ingest will return 500 until this is configured."
+    We allow either GOOGLE_DRIVE_API_KEY or GOOGLE_API_KEY.
+    If neither is set, we return a clean 500 error to the frontend
+    (but we DO NOT crash the worker at import time).
+    """
+    api_key = (
+        os.environ.get("GOOGLE_DRIVE_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
     )
 
-_DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
+    if not api_key:
+        # Endpoint cannot work until you configure the key in Render.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "GDRIVE_API_KEY not set – configure GOOGLE_DRIVE_API_KEY "
+                "or GOOGLE_API_KEY in Render dashboard."
+            ),
+        )
+
+    return api_key
 
 
 def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
     """
     Call the public Google Drive v3 API using an API key, listing all files
-    in the given folder.
+    in the given folder. Mirrors the URL you tested directly in the browser.
     """
+    api_key = _get_api_key()
 
-    if not _GOOGLE_API_KEY:
-        # Now we fail per-request with a clean 500 instead of breaking startup.
-        raise HTTPException(
-            status_code=500,
-            detail="Drive ingest misconfigured: GOOGLE_DRIVE_API_KEY env var is not set",
-        )
-
+    # Same query pattern as in your manual test:
+    #    q='<folder_id>' in parents and trashed=false
     query_str = f"'{folder_id}' in parents and trashed=false"
 
     params = {
         "q": query_str,
-        "key": _GOOGLE_API_KEY,
+        "key": api_key,
         "fields": "files(id,name,mimeType,webViewLink,modifiedTime)",
         "supportsAllDrives": "true",
         "includeItemsFromAllDrives": "true",
@@ -69,7 +83,7 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
             folder_id,
             body,
         )
-        # Surface as 502 so the frontend knows it's an upstream issue.
+        # 502 = “upstream” problem; keeps it separate from our own 4xx.
         raise HTTPException(
             status_code=502,
             detail=f"Drive ingest failed: Google Drive API HTTP {exc.code}: {body}",
@@ -99,7 +113,6 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
 # Ingest endpoint
 # ---------------------------------------------------------------------------
 
-
 @router.api_route("/drive/ingest", methods=["POST", "GET"])
 async def ingest_drive_folder(
     folder_id: str = Query(..., alias="folderId"),
@@ -109,12 +122,12 @@ async def ingest_drive_folder(
     Ingest a Google Drive folder.
 
     Current behaviour:
-      * fetch the file list via API key
-      * return them as JSON so we can confirm everything works
+      * Fetch the file list via API key
+      * Return them as JSON for debugging
 
     Later:
-      * for each file, download + embed + store in vector DB
-      * link the embeddings to the given chat_id (e.g. 'villa-ops')
+      * For each file: download + embed + store in vector DB
+      * Link those embeddings to the given chat_id (e.g. 'villa-ops')
     """
     logger.info("Starting ingest for folder %s (chat_id=%s)", folder_id, chat_id)
 
