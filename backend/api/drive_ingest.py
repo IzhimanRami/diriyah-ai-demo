@@ -1,15 +1,10 @@
 # backend/api/drive_ingest.py
 """
-Drive ingest endpoint.
+Drive ingestion endpoint.
 
-For now this:
-  * lists ALL files in a given Google Drive folder (no MIME-type filter)
-  * returns them as JSON so the frontend / console can consume them
-
-Later we can plug in:
-  - per-file content download
-  - chunking + embeddings
-  - vector search tied to chatId / project
+Uses the public Google Drive v3 API with an API key (no service account)
+to list ALL files in a folder. This is the foundation for the later
+Q&A / embeddings pipeline.
 """
 
 from __future__ import annotations
@@ -19,6 +14,7 @@ import logging
 import os
 import urllib.parse
 import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -27,71 +23,88 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# ------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Google Drive API helper using API KEY (no service account)
-# ------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
-# In production, move this to an env var and REMOVE the hard-coded fallback.
-_GOOGLE_API_KEY: str = (
+# IMPORTANT:
+#  - In production, set GOOGLE_DRIVE_API_KEY (or GOOGLE_API_KEY) in Render.
+#  - The hard-coded key is just a fallback for this demo.
+_GOOGLE_API_KEY = (
     os.environ.get("GOOGLE_DRIVE_API_KEY")
     or os.environ.get("GOOGLE_API_KEY")
-    or "AIzaSyCt67CzFTVc-G0O6CuZZLs60uiaBsOXQtc"  # <- demo fallback
+    or "AIzaSyCt67CzFTVc-G0O6CuZZLs60uiaBsOXQtc"
 )
 
 
 def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
     """
     Call the public Google Drive v3 API using an API key, listing all files
-    in the given folder. This mirrors the URL you tested in the browser.
+    in the given folder.
 
-    NOTE: We ONLY *list* here – no file download, no export. That keeps the
-    endpoint simple and avoids 400 errors from per-file calls.
+    This matches the manual URL you tested in the browser:
+
+      https://www.googleapis.com/drive/v3/files
+        ?q='<FOLDER_ID>' in parents and trashed=false
+        &key=YOUR_API_KEY
+        &fields=files(id,name,mimeType,webViewLink,modifiedTime)
     """
     if not _GOOGLE_API_KEY:
         raise RuntimeError("Google Drive API key is not configured")
 
-    # Same query pattern you used manually:
-    #   q='%FOLDER%' in parents and trashed=false
     query_str = f"'{folder_id}' in parents and trashed=false"
 
     params = {
         "q": query_str,
         "key": _GOOGLE_API_KEY,
-        # IMPORTANT: we do NOT filter by mimeType -> ALL file types are returned
         "fields": "files(id,name,mimeType,webViewLink,modifiedTime)",
+        # Be generous so we get everything in one call for the demo
+        "pageSize": 1000,
+        # Safer when working with shared drives as well
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
     }
 
     url = "https://www.googleapis.com/drive/v3/files?" + urllib.parse.urlencode(params)
+
     logger.info("Calling Google Drive API for folder %s", folder_id)
+    logger.debug("Google Drive URL: %s", url)
 
     try:
         with urllib.request.urlopen(url, timeout=30) as resp:
             raw = resp.read()
-    except Exception as exc:  # noqa: BLE001
+    except urllib.error.HTTPError as exc:
+        # Read the response body so we can see Google's real error message
+        try:
+            body = exc.read().decode("utf-8", errors="ignore")
+        except Exception:  # pragma: no cover - very defensive
+            body = ""
+
+        logger.error(
+            "Google Drive API HTTP %s for folder %s: %s",
+            exc.code,
+            folder_id,
+            body,
+        )
+        raise RuntimeError(f"Google Drive API HTTP {exc.code}: {body}") from exc
+    except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Error calling Google Drive API")
-        # Bubble up as 502 from *our* API, instead of letting it crash the worker
-        raise HTTPException(
-            status_code=502,
-            detail=f"HTTP error calling Google Drive API: {exc}",
-        ) from exc
+        raise RuntimeError(f"HTTP error calling Google Drive API: {exc}") from exc
 
     try:
         data = json.loads(raw.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Failed to decode Google Drive response as JSON")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to parse Google Drive response: {exc}",
-        ) from exc
+        raise RuntimeError(f"Failed to parse Google Drive response: {exc}") from exc
 
     files = data.get("files", [])
     logger.info("Google Drive returned %d files for folder %s", len(files), folder_id)
     return files
 
 
-# ------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Ingest endpoint
-# ------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 
 @router.api_route("/drive/ingest", methods=["POST", "GET"])
@@ -102,32 +115,29 @@ async def ingest_drive_folder(
     """
     Ingest a Google Drive folder.
 
-    CURRENT BEHAVIOUR:
-      * Fetch list of ALL files via API key.
-      * Return metadata to the caller.
-      * `chatId` is accepted for future use (linking ingestion to a conversation),
-        but is not yet used in any server-side logic.
+    For now this:
+      * fetches the file list via API key
+      * returns ALL files (any mimeType) as JSON
 
-    This keeps the endpoint fast and reliable while we wire up the
-    embeddings / vector store in a second step.
+    Later we will:
+      * download only text-bearing files (pdf, docx, pptx, xlsx, txt, etc.)
+      * create embeddings using OpenAI
+      * store them in a vector DB keyed by `chat_id` / project
     """
-    logger.info("Starting ingest for folder %s (chatId=%s)", folder_id, chat_id)
+    logger.info("Starting ingest for folder %s (chat_id=%s)", folder_id, chat_id)
 
     try:
         files = _fetch_drive_files_via_api_key(folder_id)
-    except HTTPException:
-        # Already logged and wrapped with an HTTPException above.
-        raise
+        return {
+            "folderId": folder_id,
+            "chatId": chat_id,
+            "fileCount": len(files),
+            "files": files,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.exception("Drive ingest failed for folder %s", folder_id)
+        # Return 500 JSON with the *full* message including Google's error
         raise HTTPException(
             status_code=500,
             detail=f"Drive ingest failed: {exc}",
         ) from exc
-
-    return {
-        "folderId": folder_id,
-        "chatId": chat_id,
-        "fileCount": len(files),
-        "files": files,
-    }
