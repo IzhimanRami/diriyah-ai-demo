@@ -1,13 +1,4 @@
 # backend/api/drive_ingest.py
-"""
-Drive ingestion endpoint.
-
-Uses the public Google Drive v3 API with an API key (no service account)
-to list ALL files in a folder. This is the foundation for the later
-Q&A / embeddings pipeline.
-"""
-
-from __future__ import annotations
 
 import json
 import logging
@@ -27,75 +18,72 @@ router = APIRouter()
 # Google Drive API helper using API KEY (no service account)
 # ---------------------------------------------------------------------------
 
-# IMPORTANT:
-#  - In production, set GOOGLE_DRIVE_API_KEY (or GOOGLE_API_KEY) in Render.
-#  - The hard-coded key is just a fallback for this demo.
+# In production, move this to an env var and REMOVE the hard-coded fallback.
 _GOOGLE_API_KEY = (
     os.environ.get("GOOGLE_DRIVE_API_KEY")
     or os.environ.get("GOOGLE_API_KEY")
-    or "AIzaSyCt67CzFTVc-G0O6CuZZLs60uiaBsOXQtc"
+    or "AIzaSyCt67CzFTVc-G0O6CuZZLs60uiaBsOXQtc"  # demo fallback
 )
+
+_DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
 
 
 def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
     """
     Call the public Google Drive v3 API using an API key, listing all files
-    in the given folder.
-
-    This matches the manual URL you tested in the browser:
-
-      https://www.googleapis.com/drive/v3/files
-        ?q='<FOLDER_ID>' in parents and trashed=false
-        &key=YOUR_API_KEY
-        &fields=files(id,name,mimeType,webViewLink,modifiedTime)
+    in the given folder. This should mirror the URL that works in your browser.
     """
     if not _GOOGLE_API_KEY:
         raise RuntimeError("Google Drive API key is not configured")
 
+    # Same query pattern you used in the browser:
     query_str = f"'{folder_id}' in parents and trashed=false"
 
     params = {
         "q": query_str,
         "key": _GOOGLE_API_KEY,
         "fields": "files(id,name,mimeType,webViewLink,modifiedTime)",
-        # Be generous so we get everything in one call for the demo
-        "pageSize": 1000,
-        # Safer when working with shared drives as well
+        # These help with shared drives / “My Drive” edge cases
         "supportsAllDrives": "true",
         "includeItemsFromAllDrives": "true",
     }
 
-    url = "https://www.googleapis.com/drive/v3/files?" + urllib.parse.urlencode(params)
+    url = _DRIVE_LIST_URL + "?" + urllib.parse.urlencode(params)
 
-    logger.info("Calling Google Drive API for folder %s", folder_id)
-    logger.debug("Google Drive URL: %s", url)
+    logger.info("Drive ingest: calling Google Drive API for folder %s", folder_id)
+    logger.debug("Drive ingest URL: %s", url)
 
     try:
         with urllib.request.urlopen(url, timeout=30) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
-        # Read the response body so we can see Google's real error message
-        try:
-            body = exc.read().decode("utf-8", errors="ignore")
-        except Exception:  # pragma: no cover - very defensive
-            body = ""
-
+        body = exc.read().decode("utf-8", errors="ignore")
         logger.error(
-            "Google Drive API HTTP %s for folder %s: %s",
+            "Google Drive API HTTP error %s while ingesting folder %s: %s",
             exc.code,
             folder_id,
             body,
         )
-        raise RuntimeError(f"Google Drive API HTTP {exc.code}: {body}") from exc
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("Error calling Google Drive API")
-        raise RuntimeError(f"HTTP error calling Google Drive API: {exc}") from exc
+        # Surface as 502 to the frontend so we don't confuse it with our own 4xx.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Drive ingest failed: Google Drive API HTTP {exc.code}: {body}",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Network/unknown error calling Google Drive API")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Drive ingest failed: {exc}",
+        ) from exc
 
     try:
         data = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to decode Google Drive response as JSON")
-        raise RuntimeError(f"Failed to parse Google Drive response: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to parse Google Drive response: {exc}",
+        ) from exc
 
     files = data.get("files", [])
     logger.info("Google Drive returned %d files for folder %s", len(files), folder_id)
@@ -115,29 +103,21 @@ async def ingest_drive_folder(
     """
     Ingest a Google Drive folder.
 
-    For now this:
-      * fetches the file list via API key
-      * returns ALL files (any mimeType) as JSON
+    Current behaviour:
+      * fetch the file list via API key
+      * return them as JSON so we can confirm everything works
 
-    Later we will:
-      * download only text-bearing files (pdf, docx, pptx, xlsx, txt, etc.)
-      * create embeddings using OpenAI
-      * store them in a vector DB keyed by `chat_id` / project
+    Later:
+      * for each file, download + embed + store in vector DB
+      * link the embeddings to the given chat_id (e.g. 'villa-ops')
     """
     logger.info("Starting ingest for folder %s (chat_id=%s)", folder_id, chat_id)
 
-    try:
-        files = _fetch_drive_files_via_api_key(folder_id)
-        return {
-            "folderId": folder_id,
-            "chatId": chat_id,
-            "fileCount": len(files),
-            "files": files,
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Drive ingest failed for folder %s", folder_id)
-        # Return 500 JSON with the *full* message including Google's error
-        raise HTTPException(
-            status_code=500,
-            detail=f"Drive ingest failed: {exc}",
-        ) from exc
+    files = _fetch_drive_files_via_api_key(folder_id)
+
+    return {
+        "folderId": folder_id,
+        "chatId": chat_id,
+        "fileCount": len(files),
+        "files": files,
+    }
