@@ -1,8 +1,7 @@
-# backend/api/drive_ingest.py
-
 import json
 import logging
 import os
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -14,86 +13,108 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Base URL for Drive v3
-_DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
-
+# --- Configuration for Retry Logic ---
+MAX_RETRIES = 3
+RETRY_DELAY_SEC = 2 # Wait 2 seconds before retrying network calls
+# -------------------------------------
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Google Drive API helper using API KEY (no service account)
 # ---------------------------------------------------------------------------
 
-def _get_api_key() -> str:
-    """
-    Read the Google API key from the environment.
+_GOOGLE_API_KEY = os.environ.get("GOOGLE_DRIVE_API_KEY")
 
-    We allow either GOOGLE_DRIVE_API_KEY or GOOGLE_API_KEY.
-    If neither is set, we return a clean 500 error to the frontend
-    (but we DO NOT crash the worker at import time).
-    """
-    api_key = (
-        os.environ.get("GOOGLE_DRIVE_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
+if not _GOOGLE_API_KEY:
+    logger.warning(
+        "GOOGLE_DRIVE_API_KEY env var is not set. "
+        "Drive ingest will return 500 until this is configured."
     )
 
-    if not api_key:
-        # Endpoint cannot work until you configure the key in Render.
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "GDRIVE_API_KEY not set – configure GOOGLE_DRIVE_API_KEY "
-                "or GOOGLE_API_KEY in Render dashboard."
-            ),
-        )
-
-    return api_key
+_DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
 
 
 def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
     """
     Call the public Google Drive v3 API using an API key, listing all files
-    in the given folder. Mirrors the URL you tested directly in the browser.
+    in the given folder, with a retry mechanism for robustness.
     """
-    api_key = _get_api_key()
 
-    # Same query pattern as in your manual test:
-    #    q='<folder_id>' in parents and trashed=false
+    if not _GOOGLE_API_KEY:
+        # Now we fail per-request with a clean 500 instead of breaking startup.
+        raise HTTPException(
+            status_code=500,
+            detail="Drive ingest misconfigured: GOOGLE_DRIVE_API_KEY env var is not set",
+        )
+
     query_str = f"'{folder_id}' in parents and trashed=false"
 
     params = {
         "q": query_str,
-        "key": api_key,
+        "key": _GOOGLE_API_KEY,
         "fields": "files(id,name,mimeType,webViewLink,modifiedTime)",
         "supportsAllDrives": "true",
         "includeItemsFromAllDrives": "true",
     }
 
     url = _DRIVE_LIST_URL + "?" + urllib.parse.urlencode(params)
+    
+    raw = None  # Variable to hold the successful response data
 
-    logger.info("Drive ingest: calling Google Drive API for folder %s", folder_id)
-    logger.debug("Drive ingest URL: %s", url)
-
-    try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="ignore")
-        logger.error(
-            "Google Drive API HTTP error %s while ingesting folder %s: %s",
-            exc.code,
+    # --- Start Retry Loop ---
+    for attempt in range(1, MAX_RETRIES + 1):
+        logger.info(
+            "Drive ingest: calling Google Drive API for folder %s (Attempt %d/%d)",
             folder_id,
-            body,
+            attempt,
+            MAX_RETRIES,
         )
-        # 502 = “upstream” problem; keeps it separate from our own 4xx.
-        raise HTTPException(
-            status_code=502,
-            detail=f"Drive ingest failed: Google Drive API HTTP {exc.code}: {body}",
-        ) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Network/unknown error calling Google Drive API")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Drive ingest failed: {exc}",
-        ) from exc
+        logger.debug("Drive ingest URL: %s", url)
+
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                raw = resp.read()
+            
+            # Success! Break the retry loop.
+            logger.info("Drive API call successful on attempt %d.", attempt)
+            break 
+            
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            logger.warning(
+                "Google Drive API HTTP error %s on attempt %d: %s",
+                exc.code,
+                attempt,
+                body,
+            )
+            
+            # If it's the final attempt, raise the error.
+            if attempt == MAX_RETRIES:
+                logger.error("All %d retries failed for folder %s.", MAX_RETRIES, folder_id)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Drive ingest failed after {MAX_RETRIES} attempts: Google Drive API HTTP {exc.code}: {body}",
+                ) from exc
+            
+            # Wait before the next attempt
+            time.sleep(RETRY_DELAY_SEC)
+            
+        except Exception as exc:  # noqa: BLE001 (For network/unknown errors)
+            logger.exception("Network/unknown error calling Google Drive API on attempt %d.", attempt)
+            
+            if attempt == MAX_RETRIES:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Drive ingest failed after {MAX_RETRIES} attempts: {exc}",
+                ) from exc
+            
+            time.sleep(RETRY_DELAY_SEC)
+    
+    # --- End Retry Loop ---
+
+    if raw is None:
+        # Should not happen if exceptions are raised correctly, but serves as a final safeguard.
+        logger.error("Failed to obtain raw response data after all retries.")
+        raise HTTPException(status_code=502, detail="Drive ingest failed: Could not retrieve data from Google Drive.")
 
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -113,6 +134,7 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
 # Ingest endpoint
 # ---------------------------------------------------------------------------
 
+
 @router.api_route("/drive/ingest", methods=["POST", "GET"])
 async def ingest_drive_folder(
     folder_id: str = Query(..., alias="folderId"),
@@ -120,17 +142,18 @@ async def ingest_drive_folder(
 ):
     """
     Ingest a Google Drive folder.
-
+    
     Current behaviour:
-      * Fetch the file list via API key
-      * Return them as JSON for debugging
+      * fetch the file list via API key
+      * return them as JSON so we can confirm everything works
 
     Later:
-      * For each file: download + embed + store in vector DB
-      * Link those embeddings to the given chat_id (e.g. 'villa-ops')
+      * for each file, download + embed + store in vector DB
+      * link the embeddings to the given chat_id (e.g. 'villa-ops')
     """
     logger.info("Starting ingest for folder %s (chat_id=%s)", folder_id, chat_id)
 
+    # This call now includes the retry mechanism
     files = _fetch_drive_files_via_api_key(folder_id)
 
     return {
