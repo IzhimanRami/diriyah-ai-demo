@@ -18,11 +18,14 @@ router = APIRouter()
 # Google Drive API helper using API KEY (no service account)
 # ---------------------------------------------------------------------------
 
-# In production, move this to an env var and REMOVE the hard-coded fallback.
 _GOOGLE_API_KEY = os.environ.get("GOOGLE_DRIVE_API_KEY")
 
 if not _GOOGLE_API_KEY:
-    raise RuntimeError("GOOGLE_DRIVE_API_KEY env var is not set")
+    # Do NOT crash the app on import – just warn.
+    logger.warning(
+        "GOOGLE_DRIVE_API_KEY env var is not set. "
+        "Drive ingest will return 500 until this is configured."
+    )
 
 _DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
 
@@ -30,19 +33,22 @@ _DRIVE_LIST_URL = "https://www.googleapis.com/drive/v3/files"
 def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
     """
     Call the public Google Drive v3 API using an API key, listing all files
-    in the given folder. This should mirror the URL that works in your browser.
+    in the given folder.
     """
-    if not _GOOGLE_API_KEY:
-        raise RuntimeError("Google Drive API key is not configured")
 
-    # Same query pattern you used in the browser:
+    if not _GOOGLE_API_KEY:
+        # Now we fail per-request with a clean 500 instead of breaking startup.
+        raise HTTPException(
+            status_code=500,
+            detail="Drive ingest misconfigured: GOOGLE_DRIVE_API_KEY env var is not set",
+        )
+
     query_str = f"'{folder_id}' in parents and trashed=false"
 
     params = {
         "q": query_str,
         "key": _GOOGLE_API_KEY,
         "fields": "files(id,name,mimeType,webViewLink,modifiedTime)",
-        # These help with shared drives / “My Drive” edge cases
         "supportsAllDrives": "true",
         "includeItemsFromAllDrives": "true",
     }
@@ -63,7 +69,7 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
             folder_id,
             body,
         )
-        # Surface as 502 to the frontend so we don't confuse it with our own 4xx.
+        # Surface as 502 so the frontend knows it's an upstream issue.
         raise HTTPException(
             status_code=502,
             detail=f"Drive ingest failed: Google Drive API HTTP {exc.code}: {body}",
