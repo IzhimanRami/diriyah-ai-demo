@@ -48,7 +48,7 @@ def _fetch_drive_files_via_api_key(folder_id: str) -> List[Dict[str, Any]]:
         )
 
     # EXACTLY the query that works in your browser:
-    # query_str = f"'{folder_id}' in parents and trashed=false"
+ 
 query_str = f"'{folder_id}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'"
     params = {
         "q": query_str,
