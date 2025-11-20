@@ -1,19 +1,23 @@
 import React, { useState } from "react";
 import { ingestDrive } from "../api/drive";
 
-const DRIVE_FOLDER_ID = "1dOD0ZLvA-iBFBePcZSKJ0zX1q67OyoT9";
-const CHAT_ID = "villa-ops"; // the same you used in the console test
+const DRIVE_FOLDER_ID = "1dOD0ZLvA-iBFBePcZSKJ0zX1q67OyoT9"; // Villa 100 folder for now
 
-export default function DriveIngestButton() {
+export default function DriveIngestButton({ chatId }) {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
 
   const handleClick = async () => {
+    if (!chatId) {
+      setStatus("No active chat selected.");
+      return;
+    }
+
     setLoading(true);
-    setStatus("Starting Drive sync…");
+    setStatus("Starting Google Drive sync…");
 
     try {
-      const result = await ingestDrive(DRIVE_FOLDER_ID, CHAT_ID);
+      const result = await ingestDrive(DRIVE_FOLDER_ID, chatId);
 
       if (result?.error) {
         setStatus(`Error: ${result.error}`);
@@ -33,23 +37,17 @@ export default function DriveIngestButton() {
   };
 
   return (
-    <div className="p-6 rounded-xl border border-gray-200 bg-white shadow-sm">
-      <h2 className="text-lg font-semibold mb-2">Google Drive sync</h2>
-      <p className="text-sm text-gray-600 mb-4">
-        Click the button to pull files from the project Drive folder into this chat.
-      </p>
-
+    <div className="drive-ingest-widget">
       <button
         onClick={handleClick}
         disabled={loading}
-        className="px-4 py-2 rounded-lg border text-sm font-medium
-                   disabled:opacity-60 disabled:cursor-not-allowed"
+        className="px-3 py-1.5 text-sm rounded border disabled:opacity-60"
       >
         {loading ? "Syncing…" : "Sync from Google Drive"}
       </button>
 
       {status && (
-        <p className="mt-3 text-sm text-gray-700">
+        <p className="mt-2 text-xs text-gray-700">
           {status}
         </p>
       )}
