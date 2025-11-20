@@ -16,6 +16,16 @@ function ContextIcon({ type, isActive }) {
       );
       break;
     case "files":
+{activeTab === "files" && (
+  <div className="context-panel__body">
+    {/* Google Drive sync button */}
+    <DriveIngestButton chatId={conversation.id} />
+
+    {/* existing Files content under it */}
+    {/* ... whatever is already there ... */}
+  </div>
+)}
+      
       paths = (
         <>
           <path d="M8 4h5l5 5v11H8z" />
