@@ -1,4 +1,33 @@
 # backend/api/drive_ingest.py
+DOWNLOAD_URL = "https://www.googleapis.com/drive/v3/files/{file_id}"
+
+def _download_drive_file(file_id: str, mime_type: str) -> bytes:
+    """
+    Download the file content from Google Drive using the API key.
+
+    For Google Docs/Sheets/Slides you can add special export logic later.
+    For now we handle 'normal' files like PDFs, text, Word, etc.
+    """
+    params = {
+        "alt": "media",
+        "key": _GOOGLE_API_KEY,
+    }
+    url = DOWNLOAD_URL.format(file_id=file_id) + "?" + urllib.parse.urlencode(params)
+
+    logger.info("Downloading Drive file %s", file_id)
+
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        logger.warning(
+            "Failed to download file %s from Drive: HTTP %s %s",
+            file_id,
+            exc.code,
+            body,
+        )
+        raise
 
 import json
 import logging
