@@ -16,16 +16,6 @@ function ContextIcon({ type, isActive }) {
       );
       break;
     case "files":
-{activeTab === "files" && (
-  <div className="context-panel__body">
-    {/* Google Drive sync button */}
-    <DriveIngestButton chatId={conversation.id} />
-
-    {/* existing Files content under it */}
-    {/* ... whatever is already there ... */}
-  </div>
-)}
-      
       paths = (
         <>
           <path d="M8 4h5l5 5v11H8z" />
@@ -160,7 +150,9 @@ export default function ChatUI({
     const fileName = event.target.files?.[0]?.name;
     if (fileName) {
       onUploadAttachment?.(conversation.id, fileName);
-      setComposerValue((previous) => (previous ? `${previous}\nAttached: ${fileName}` : `Attached: ${fileName}`));
+      setComposerValue((previous) =>
+        previous ? `${previous}\nAttached: ${fileName}` : `Attached: ${fileName}`,
+      );
     }
     if (event.target) {
       event.target.value = "";
@@ -233,7 +225,10 @@ export default function ChatUI({
                       <button type="button" onClick={() => onMessageAction?.(conversation.id, message.id, "copy")}>
                         Copy
                       </button>
-                      <button type="button" onClick={() => onMessageAction?.(conversation.id, message.id, "follow-up")}>
+                      <button
+                        type="button"
+                        onClick={() => onMessageAction?.(conversation.id, message.id, "follow-up")}
+                      >
                         Follow up
                       </button>
                     </div>
@@ -305,8 +300,17 @@ export default function ChatUI({
             );
           })}
         </div>
+
         <div className="context-panel__content" role="tabpanel">
           <h3>{activeContextTab.label}</h3>
+
+          {/* Show Drive button only on the Files tab */}
+          {activeContextTab.id === "files" && (
+            <div className="context-panel__body" style={{ marginBottom: "1rem" }}>
+              <DriveIngestButton chatId={conversation.id} />
+            </div>
+          )}
+
           <ul>
             {activeContextTab.items.map((item, index) => (
               <li key={`${activeContextTab.id}-${index}`}>
