@@ -1,48 +1,57 @@
 import React, { useState } from "react";
 import { ingestDrive } from "../api/drive";
 
+const DRIVE_FOLDER_ID = "1dOD0ZLvA-iBFBePcZSKJ0zX1q67OyoT9";
+const CHAT_ID = "villa-ops"; // the same you used in the console test
+
 export default function DriveIngestButton() {
-  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState("");
 
-  async function handleClick() {
-    setStatus("Syncing…");
+  const handleClick = async () => {
+    setLoading(true);
+    setStatus("Starting Drive sync…");
 
-    const result = await ingestDrive(
-      "1dOD0ZLvA-iBfBEpCzSKJ0zX1q67OyoT9",  // <<< your folderId
-      "villa-ops"                          // <<< your chatId
-    );
+    try {
+      const result = await ingestDrive(DRIVE_FOLDER_ID, CHAT_ID);
 
-    setStatus(JSON.stringify(result, null, 2));
-  }
+      if (result?.error) {
+        setStatus(`Error: ${result.error}`);
+      } else {
+        const count =
+          result.fileCount ??
+          (Array.isArray(result.files) ? result.files.length : 0);
+
+        setStatus(`Done. Synced ${count} file(s) from Google Drive.`);
+      }
+    } catch (err) {
+      console.error(err);
+      setStatus("Unexpected error while syncing Drive.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div style={{ marginTop: "20px" }}>
+    <div className="p-6 rounded-xl border border-gray-200 bg-white shadow-sm">
+      <h2 className="text-lg font-semibold mb-2">Google Drive sync</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Click the button to pull files from the project Drive folder into this chat.
+      </p>
+
       <button
         onClick={handleClick}
-        style={{
-          padding: "10px 18px",
-          background: "#4a5",
-          color: "#fff",
-          borderRadius: "6px",
-          border: "none",
-          cursor: "pointer"
-        }}
+        disabled={loading}
+        className="px-4 py-2 rounded-lg border text-sm font-medium
+                   disabled:opacity-60 disabled:cursor-not-allowed"
       >
-        Sync Google Drive Files
+        {loading ? "Syncing…" : "Sync from Google Drive"}
       </button>
 
       {status && (
-        <pre
-          style={{
-            background: "#eee",
-            padding: "10px",
-            marginTop: "10px",
-            fontSize: "12px",
-            whiteSpace: "pre-wrap"
-          }}
-        >
+        <p className="mt-3 text-sm text-gray-700">
           {status}
-        </pre>
+        </p>
       )}
     </div>
   );
