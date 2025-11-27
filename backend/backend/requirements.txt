@@ -14,3 +14,7 @@ chromadb
 pdfminer.six
 prometheus_client
 httpx
+SQLAlchemy>=2.0
+psycopg2-binary
+pgvector
+openai
